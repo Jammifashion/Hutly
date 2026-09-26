@@ -7,7 +7,6 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,8 +22,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -32,10 +35,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.game.GameViewModel
+import com.example.game.ScreenState
 import com.example.game.audio.SoundSynthesizer
 import com.example.game.graphics.CameraPreset
 import com.example.game.graphics.Hat3DRenderer
 import com.example.state.HatTier
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.cos
 import kotlin.math.sin
 
 @OptIn(ExperimentalComposeUiApi::class)
@@ -65,7 +72,7 @@ fun GameScreen(
         }
     }
 
-    // Dynamic responsive camera zoom when pouring (brings the active glass right into the player's face!)
+    // Dynamic camera zoom when pouring (brings the active glass right into view!)
     val dynamicPourZoom by animateFloatAsState(
         targetValue = if (isHoldingPour) 1.10f else 1.0f,
         animationSpec = spring(
@@ -75,7 +82,7 @@ fun GameScreen(
         label = "dynamic_pour_zoom"
     )
 
-    // Gentle pulse animation for the active alignment feedback
+    // Pulse animation for alignment and combo
     val infiniteTransition = rememberInfiniteTransition(label = "game_fx")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 0.98f,
@@ -87,32 +94,225 @@ fun GameScreen(
         label = "pulse_scale"
     )
 
+    // Combo >= 3 Mega Glow & Scale Pulse
+    val megaComboPulse by infiniteTransition.animateFloat(
+        initialValue = 1.10f,
+        targetValue = 1.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 350, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "combo_fire_pulse"
+    )
+
+    // Screen Shake & Red Flash on Spill / Overflow (up to 6dp decay)
+    val shakeX = remember { Animatable(0f) }
+    val shakeY = remember { Animatable(0f) }
+    val redVignetteAlpha = remember { Animatable(0f) }
+    var prevLives by remember { mutableIntStateOf(uiState.lives) }
+
+    LaunchedEffect(uiState.lives) {
+        if (uiState.lives < prevLives) {
+            launch {
+                val steps = 7
+                for (s in steps downTo 1) {
+                    val amp = (s.toFloat() / steps) * 6f // max 6dp
+                    val dx = if (s % 2 == 0) amp else -amp
+                    val dy = if (s % 3 == 0) amp * 0.7f else -amp * 0.7f
+                    shakeX.snapTo(dx)
+                    shakeY.snapTo(dy)
+                    delay(35)
+                }
+                shakeX.animateTo(0f, tween(40))
+                shakeY.animateTo(0f, tween(40))
+            }
+            launch {
+                redVignetteAlpha.snapTo(0.70f)
+                redVignetteAlpha.animateTo(0f, tween(420, easing = LinearOutSlowInEasing))
+            }
+        }
+        prevLives = uiState.lives
+    }
+
+    // Feedback Text Bounce & Overshoot Spring Animation
+    val feedbackScale = remember { Animatable(1.0f) }
+    LaunchedEffect(uiState.feedbackMessage) {
+        if (uiState.feedbackMessage != null) {
+            feedbackScale.snapTo(0.72f)
+            feedbackScale.animateTo(
+                targetValue = 1.0f,
+                animationSpec = spring(
+                    dampingRatio = 0.46f, // Snappy overshoot
+                    stiffness = Spring.StiffnessMedium
+                )
+            )
+        }
+    }
+
+    // Victory celebration (Hut geschafft): Confetti & Hat Bounce
+    val isVictory = uiState.screenState == ScreenState.ROUND_SUCCESS
+    val victoryHop = remember { Animatable(0f) }
+    LaunchedEffect(isVictory) {
+        if (isVictory) {
+            launch {
+                victoryHop.animateTo(
+                    targetValue = -30f,
+                    animationSpec = tween(280, easing = FastOutSlowInEasing)
+                )
+                victoryHop.animateTo(
+                    targetValue = 0f,
+                    animationSpec = spring(dampingRatio = 0.45f, stiffness = Spring.StiffnessLow)
+                )
+            }
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .offset(x = shakeX.value.dp, y = (shakeY.value + victoryHop.value).dp)
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF140D07),
-                        Color(0xFF26140B),
-                        Color(0xFF331B0E),
-                        Color(0xFF1A0E07)
+                        Color(0xFF140B06), // Warm cantina sunset amber
+                        Color(0xFF261209),
+                        Color(0xFF3A1A0C),
+                        Color(0xFF1C0D06)
                     )
                 )
             )
     ) {
-        // Decorative background fairy light particles
+        // ATMOSPHERIC BACKGROUND SCENE: 3-Plane Parallax Bokeh & Festive Lichterkette Garland
         Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
             val t = frameTicks / 1_000_000_000f
-            for (i in 0..15) {
-                val px = ((i * 120 + 30) % size.width.toInt()).toFloat()
-                val py = ((i * 90 + 50) % (size.height * 0.45f).toInt()).toFloat()
-                val pulse = 0.25f + 0.15f * sin(t * 2.5f + i)
+
+            // Layer 1 (Far Depth): Large soft warm Bokeh orbs drifting slowly
+            val bokehColors = listOf(
+                Color(0x33FFB300), // Amber
+                Color(0x28FF4081), // Fiesta pink
+                Color(0x2800E5FF), // Curacao cyan
+                Color(0x30FFA000)  // Golden lantern
+            )
+            for (i in 0..7) {
+                val seed = i * 47.3f
+                val bx = ((w * 0.12f + i * (w * 0.12f) + sin(t * 0.3f + seed) * 35f) % w)
+                val by = (h * 0.08f + (i % 3) * (h * 0.14f) + cos(t * 0.25f + seed) * 20f)
+                val radius = 32f + (i % 4) * 14f
+                drawCircle(
+                    color = bokehColors[i % bokehColors.size],
+                    radius = radius,
+                    center = Offset(bx, by)
+                )
+            }
+
+            // Layer 2 (Mid Depth): Draped Festoon Garland (Lichterkette) across top third
+            val garlandY = h * 0.16f
+            val garlandSag = 38f
+            val garlandPath = Path().apply {
+                moveTo(0f, garlandY)
+                cubicTo(
+                    w * 0.25f, garlandY + garlandSag,
+                    w * 0.75f, garlandY + garlandSag,
+                    w, garlandY
+                )
+            }
+            // Draw garland cable
+            drawPath(
+                path = garlandPath,
+                color = Color(0x554E342E),
+                style = Stroke(width = 2.5f, cap = StrokeCap.Round)
+            )
+
+            // Garland Edison light bulbs / glowing party lanterns
+            val numBulbs = 10
+            for (i in 1 until numBulbs) {
+                val progress = i.toFloat() / numBulbs
+                val lx = progress * w
+                val ly = garlandY + sin(progress * Math.PI.toFloat()) * garlandSag
+                val bulbColor = when (i % 4) {
+                    0 -> Color(0xFFFFD54F)
+                    1 -> Color(0xFFFF8A80)
+                    2 -> Color(0xFF80D8FF)
+                    else -> Color(0xFFCCFF90)
+                }
+                val glowAlpha = 0.55f + 0.35f * sin(t * 2.8f + i * 1.3f)
+
+                // Bulb outer halo glow
+                drawCircle(
+                    color = bulbColor.copy(alpha = glowAlpha * 0.45f),
+                    radius = 16f,
+                    center = Offset(lx, ly + 4f)
+                )
+                // Bulb core
+                drawCircle(
+                    color = Color.White.copy(alpha = glowAlpha),
+                    radius = 4.5f,
+                    center = Offset(lx, ly + 4f)
+                )
+            }
+
+            // Layer 3 (Near Ambient): Sparkling fiesta micro-particles floating upward
+            for (i in 0..14) {
+                val px = ((i * 127 + 25) % w.toInt()).toFloat()
+                val py = ((h * 0.65f - ((t * 40f + i * 50f) % (h * 0.55f))))
+                val alpha = (0.20f + 0.18f * sin(t * 3.5f + i)).coerceIn(0f, 1f)
                 drawCircle(
                     color = if (i % 2 == 0) Color(0xFFFFD54F) else Color(0xFFFF4081),
-                    radius = 3.5f,
+                    radius = 2.5f + (i % 3) * 1.2f,
                     center = Offset(px, py),
-                    alpha = pulse
+                    alpha = alpha
+                )
+            }
+
+            // Victory Confetti Rain (when round is won!)
+            if (isVictory) {
+                val confettiCount = 35
+                for (i in 0 until confettiCount) {
+                    val cx = ((i * 89 + 15) % w.toInt()).toFloat() + sin(t * 3f + i) * 25f
+                    val cy = ((t * 220f + i * 35f) % (h * 1.1f)) - 20f
+                    val cColor = when (i % 5) {
+                        0 -> Color(0xFFFFD54F)
+                        1 -> Color(0xFFFF1744)
+                        2 -> Color(0xFF00E5FF)
+                        3 -> Color(0xFF76FF03)
+                        else -> Color(0xFFFF4081)
+                    }
+                    drawRect(
+                        color = cColor,
+                        topLeft = Offset(cx, cy),
+                        size = Size(8f, 14f)
+                    )
+                }
+            }
+
+            // Edge Vignette: Smooth radial gradient darkening corners for cinematic depth
+            drawRect(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color.Transparent,
+                        Color(0x33000000),
+                        Color(0x88000000)
+                    ),
+                    center = Offset(w / 2f, h * 0.52f),
+                    radius = maxOf(w, h) * 0.72f
+                )
+            )
+
+            // Red Spill Vignette Flash
+            if (redVignetteAlpha.value > 0.01f) {
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color(0x33FF1744).copy(alpha = redVignetteAlpha.value * 0.4f),
+                            Color(0xAAFF1744).copy(alpha = redVignetteAlpha.value)
+                        ),
+                        center = Offset(w / 2f, h * 0.52f),
+                        radius = maxOf(w, h) * 0.75f
+                    )
                 )
             }
         }
@@ -124,7 +324,7 @@ fun GameScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // TOP BAR: Back, 3 Lives, Sound, and Camera Switcher
+            // TOP BAR: Back, 3 Lives, Camera Preset, Haptics & Sound
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -185,7 +385,11 @@ fun GameScreen(
                         .padding(2.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    CameraPreset.values().forEach { preset ->
+                    listOf(
+                        CameraPreset.CLOSE_UP to "Nah",
+                        CameraPreset.OVERVIEW to "Voll",
+                        CameraPreset.ACTION_CAM to "Action"
+                    ).forEach { (preset, label) ->
                         val selected = cameraPreset == preset
                         Surface(
                             onClick = {
@@ -201,7 +405,7 @@ fun GameScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = preset.shortName,
+                                    text = label,
                                     color = if (selected) Color(0xFF1B0F05) else Color(0xDDFFFFFF),
                                     fontSize = 11.sp,
                                     fontWeight = if (selected) FontWeight.Black else FontWeight.Bold
@@ -261,7 +465,7 @@ fun GameScreen(
                 }
             }
 
-            // SCORE, PROGRESS & COMBO HEADER (Compact, high information density)
+            // SCORE, PROGRESS & COMBO HEADER
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -297,24 +501,30 @@ fun GameScreen(
                     }
                 }
 
-                // Combo Badge
+                // Combo Badge with Fire/Gold Glowing Pulse for combo >= 3
                 if (uiState.combo > 1) {
+                    val isMegaCombo = uiState.combo >= 3
                     Surface(
                         shape = RoundedCornerShape(14.dp),
-                        color = Color(0xFFFF5722),
-                        modifier = Modifier.scale(pulseScale)
+                        color = if (isMegaCombo) Color(0xFFFF3D00) else Color(0xFFFF5722),
+                        border = if (isMegaCombo) {
+                            androidx.compose.foundation.BorderStroke(2.dp, Color(0xFFFFD700))
+                        } else null,
+                        modifier = Modifier
+                            .scale(if (isMegaCombo) megaComboPulse else pulseScale)
+                            .shadow(if (isMegaCombo) 12.dp else 4.dp, RoundedCornerShape(14.dp))
                     ) {
                         Text(
-                            text = "🔥 x${uiState.combo}",
-                            color = Color.White,
+                            text = if (isMegaCombo) "🔥 MEGA x${uiState.combo}!" else "🔥 x${uiState.combo}",
+                            color = if (isMegaCombo) Color(0xFFFFF9C4) else Color.White,
                             fontWeight = FontWeight.Black,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            fontSize = if (isMegaCombo) 13.sp else 12.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
                 }
 
-                // Glass Progress Badge (e.g. Glas 4/11)
+                // Glass Progress Badge
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = Color(0x3300E5FF),
@@ -330,7 +540,7 @@ fun GameScreen(
                 }
             }
 
-            // COLLISION STATUS & FEEDBACK PILL (Floating compact banner)
+            // COLLISION STATUS & FEEDBACK PILL (Spring Overshoot Animation)
             val collision = physics.lastCollisionResult
             val bannerColor = when {
                 collision.isDirectHit -> Color(0xFF00E676)
@@ -354,6 +564,7 @@ fun GameScreen(
                 border = androidx.compose.foundation.BorderStroke(1.5.dp, bannerColor),
                 modifier = Modifier
                     .fillMaxWidth(0.96f)
+                    .scale(feedbackScale.value)
                     .padding(vertical = 1.dp)
             ) {
                 Text(
@@ -368,12 +579,11 @@ fun GameScreen(
                 )
             }
 
-            // MAIN 3D INTERACTIVE PLAYFIELD CANVAS (Optimized Zoom & Mobile Perspective)
+            // MAIN 3D INTERACTIVE PLAYFIELD CANVAS
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    // Touch-and-hold anywhere on the main canvas triggers pouring!
                     .pointerInteropFilter { motionEvent ->
                         when (motionEvent.action) {
                             MotionEvent.ACTION_DOWN -> {
@@ -416,7 +626,7 @@ fun GameScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Live Glass Fill & Target Strich Indicator
+                // Live Glass Fill & Target Gauge
                 val currentTarget = collision.hitGlass?.targetFill ?: 0.70f
                 val currentFill = collision.hitGlass?.currentFill ?: 0.0f
                 Surface(
@@ -460,7 +670,7 @@ fun GameScreen(
                     }
                 }
 
-                // Turntable Jog Controls & Dedicated Pouring Button
+                // Turntable Jog Controls & Pouring Button
                 Row(
                     modifier = Modifier.fillMaxWidth(0.96f),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -486,7 +696,7 @@ fun GameScreen(
                         )
                     }
 
-                    // HUGE POURING PEDAL BUTTON (Gedrückt halten zum Einschenken)
+                    // HUGE POURING PEDAL BUTTON
                     Surface(
                         shape = RoundedCornerShape(26.dp),
                         color = if (isHoldingPour) Color(0xFFFF8F00) else Color(0xFFFFB300),
@@ -521,21 +731,17 @@ fun GameScreen(
                             }
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxSize(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxSize()
                         ) {
                             Text(
-                                text = "🍾",
-                                fontSize = 26.sp
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (isHoldingPour) "SCHENKT EIN..." else "DRÜCKEN ZUM EINSCHENKEN",
-                                fontWeight = FontWeight.Black,
-                                fontSize = 13.sp,
-                                color = Color(0xFF3E1F12),
-                                textAlign = TextAlign.Center
+                                text = if (isHoldingPour) "🌊 SCHENKT EIN..." else "🫗 DRÜCKEN ZUM EINSCHENKEN",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Black,
+                                    letterSpacing = 0.5.sp
+                                ),
+                                color = Color(0xFF2C150A)
                             )
                         }
                     }

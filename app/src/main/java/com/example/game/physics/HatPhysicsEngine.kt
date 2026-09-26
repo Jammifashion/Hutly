@@ -60,6 +60,84 @@ class HatPhysicsEngine {
     val splashParticles = mutableListOf<SplashParticle>()
     val bottomSplashRipples = mutableListOf<BottomSplashRipple>()
 
+    // Object pools to eliminate object allocations in physics loops
+    private val splashParticlePool = ArrayDeque<SplashParticle>(96)
+    private val dropletPool = ArrayDeque<StreamDroplet>(48)
+    private val ripplePool = ArrayDeque<BottomSplashRipple>(24)
+
+    private fun obtainSplashParticle(
+        x: Float, y: Float, z: Float,
+        vx: Float, vy: Float, vz: Float,
+        size: Float, alpha: Float,
+        color: Long, isGlassBottom: Boolean = false, sparkle: Boolean = false
+    ): SplashParticle {
+        val p = splashParticlePool.removeFirstOrNull() ?: SplashParticle(x, y, z, vx, vy, vz, size, alpha, color, isGlassBottom, sparkle)
+        p.x = x
+        p.y = y
+        p.z = z
+        p.vx = vx
+        p.vy = vy
+        p.vz = vz
+        p.size = size
+        p.alpha = alpha
+        p.color = color
+        p.isGlassBottom = isGlassBottom
+        p.sparkle = sparkle
+        return p
+    }
+
+    private fun recycleSplashParticle(p: SplashParticle) {
+        if (splashParticlePool.size < 120) {
+            splashParticlePool.addLast(p)
+        }
+    }
+
+    private fun obtainDroplet(
+        x: Float, y: Float, z: Float,
+        vx: Float, vy: Float, vz: Float,
+        radius: Float, alpha: Float, life: Float
+    ): StreamDroplet {
+        val d = dropletPool.removeFirstOrNull() ?: StreamDroplet(x, y, z, vx, vy, vz, radius, alpha, life)
+        d.x = x
+        d.y = y
+        d.z = z
+        d.vx = vx
+        d.vy = vy
+        d.vz = vz
+        d.radius = radius
+        d.alpha = alpha
+        d.life = life
+        return d
+    }
+
+    private fun recycleDroplet(d: StreamDroplet) {
+        if (dropletPool.size < 60) {
+            dropletPool.addLast(d)
+        }
+    }
+
+    private fun obtainRipple(
+        x: Float, y: Float, z: Float,
+        radius: Float, maxRadius: Float,
+        alpha: Float, color: Long
+    ): BottomSplashRipple {
+        val r = ripplePool.removeFirstOrNull() ?: BottomSplashRipple(x, y, z, radius, maxRadius, alpha, color)
+        r.x = x
+        r.y = y
+        r.z = z
+        r.radius = radius
+        r.maxRadius = maxRadius
+        r.alpha = alpha
+        r.color = color
+        return r
+    }
+
+    private fun recycleRipple(r: BottomSplashRipple) {
+        if (ripplePool.size < 30) {
+            ripplePool.addLast(r)
+        }
+    }
+
     // Current collision feedback
     var lastCollisionResult: CollisionResult = CollisionResult(
         isPouring = false,
@@ -83,8 +161,11 @@ class HatPhysicsEngine {
         baseAngularVelocity = 0.38f + (roundNumber - 1) * 0.08f
         isPouring = false
         bottleTiltAngle = 8f
+        for (d in streamDroplets) recycleDroplet(d)
         streamDroplets.clear()
+        for (p in splashParticles) recycleSplashParticle(p)
         splashParticles.clear()
+        for (r in bottomSplashRipples) recycleRipple(r)
         bottomSplashRipples.clear()
 
         // Assign slightly varying colorful liqueur per round
@@ -305,7 +386,7 @@ class HatPhysicsEngine {
 
             if (streamDroplets.size < 40) {
                 streamDroplets.add(
-                    StreamDroplet(
+                    obtainDroplet(
                         x = currentX,
                         y = currentY,
                         z = currentZ,
@@ -354,7 +435,7 @@ class HatPhysicsEngine {
 
             if (splashParticles.size < 60) {
                 splashParticles.add(
-                    SplashParticle(
+                    obtainSplashParticle(
                         x = impactX + (Random.nextFloat() - 0.5f) * 1.5f,
                         y = surfaceY + 0.5f,
                         z = impactZ + (Random.nextFloat() - 0.5f) * 1.5f,
@@ -374,7 +455,7 @@ class HatPhysicsEngine {
         // Spawn contact ripple animation on the glass bottom plane
         if (bottomSplashRipples.size < 10 && Random.nextFloat() < 0.40f) {
             bottomSplashRipples.add(
-                BottomSplashRipple(
+                obtainRipple(
                     x = impactX,
                     y = surfaceY,
                     z = impactZ,
@@ -395,38 +476,42 @@ class HatPhysicsEngine {
         val fillHeight = glass.currentFill * GLASS_HEIGHT
         val by = (RIM_PLANE_Y - GLASS_HEIGHT) + fillHeight
 
-        splashParticles.add(
-            SplashParticle(
-                x = bx,
-                y = by,
-                z = bz,
-                vx = (Random.nextFloat() - 0.5f) * 6f,
-                vy = 8f + Random.nextFloat() * 12f,
-                vz = (Random.nextFloat() - 0.5f) * 6f,
-                size = 2.5f + Random.nextFloat() * 2.0f,
-                alpha = 0.85f,
-                color = 0xFFFFF59D
+        if (splashParticles.size < 60) {
+            splashParticles.add(
+                obtainSplashParticle(
+                    x = bx,
+                    y = by,
+                    z = bz,
+                    vx = (Random.nextFloat() - 0.5f) * 6f,
+                    vy = 8f + Random.nextFloat() * 12f,
+                    vz = (Random.nextFloat() - 0.5f) * 6f,
+                    size = 2.5f + Random.nextFloat() * 2.0f,
+                    alpha = 0.85f,
+                    color = 0xFFFFF59D
+                )
             )
-        )
+        }
     }
 
     private fun spawnRimSplashes(x: Float, y: Float, z: Float, count: Int) {
         for (i in 0 until count) {
             val angle = Random.nextFloat() * 2f * PI.toFloat()
             val speed = 25f + Random.nextFloat() * 35f
-            splashParticles.add(
-                SplashParticle(
-                    x = x,
-                    y = y + 1f,
-                    z = z,
-                    vx = cos(angle) * speed,
-                    vy = 20f + Random.nextFloat() * 30f,
-                    vz = sin(angle) * speed,
-                    size = 2.5f + Random.nextFloat() * 1.8f,
-                    alpha = 1.0f,
-                    color = 0xFFFFCA28
+            if (splashParticles.size < 60) {
+                splashParticles.add(
+                    obtainSplashParticle(
+                        x = x,
+                        y = y + 1f,
+                        z = z,
+                        vx = cos(angle) * speed,
+                        vy = 20f + Random.nextFloat() * 30f,
+                        vz = sin(angle) * speed,
+                        size = 2.5f + Random.nextFloat() * 1.8f,
+                        alpha = 1.0f,
+                        color = 0xFFFFCA28
+                    )
                 )
-            )
+            }
         }
     }
 
@@ -434,19 +519,21 @@ class HatPhysicsEngine {
         for (i in 0 until count) {
             val angle = Random.nextFloat() * 2f * PI.toFloat()
             val speed = 30f + Random.nextFloat() * 50f
-            splashParticles.add(
-                SplashParticle(
-                    x = x,
-                    y = y - 4f,
-                    z = z,
-                    vx = cos(angle) * speed,
-                    vy = 15f + Random.nextFloat() * 25f,
-                    vz = sin(angle) * speed,
-                    size = 3.0f + Random.nextFloat() * 2.5f,
-                    alpha = 1.0f,
-                    color = 0xFFFF7043
+            if (splashParticles.size < 60) {
+                splashParticles.add(
+                    obtainSplashParticle(
+                        x = x,
+                        y = y - 4f,
+                        z = z,
+                        vx = cos(angle) * speed,
+                        vy = 15f + Random.nextFloat() * 25f,
+                        vz = sin(angle) * speed,
+                        size = 3.0f + Random.nextFloat() * 2.5f,
+                        alpha = 1.0f,
+                        color = 0xFFFF7043
+                    )
                 )
-            )
+            }
         }
     }
 
@@ -454,19 +541,21 @@ class HatPhysicsEngine {
         for (i in 0 until count) {
             val angle = Random.nextFloat() * 2f * PI.toFloat()
             val speed = 40f + Random.nextFloat() * 70f
-            splashParticles.add(
-                SplashParticle(
-                    x = x,
-                    y = y + 5f,
-                    z = z,
-                    vx = cos(angle) * speed,
-                    vy = 35f + Random.nextFloat() * 45f,
-                    vz = sin(angle) * speed,
-                    size = 4f + Random.nextFloat() * 3.5f,
-                    alpha = 1.0f,
-                    color = 0xFFFF5722
+            if (splashParticles.size < 60) {
+                splashParticles.add(
+                    obtainSplashParticle(
+                        x = x,
+                        y = y + 5f,
+                        z = z,
+                        vx = cos(angle) * speed,
+                        vy = 35f + Random.nextFloat() * 45f,
+                        vz = sin(angle) * speed,
+                        size = 4f + Random.nextFloat() * 3.5f,
+                        alpha = 1.0f,
+                        color = 0xFFFF5722
+                    )
                 )
-            )
+            }
         }
     }
 
@@ -482,6 +571,7 @@ class HatPhysicsEngine {
             d.alpha = (d.life / 0.3f).coerceIn(0f, 1f)
             if (d.life <= 0f || d.y <= RIM_PLANE_Y - 5f) {
                 dropletIterator.remove()
+                recycleDroplet(d)
             }
         }
 
@@ -505,6 +595,7 @@ class HatPhysicsEngine {
             }
             if (p.alpha <= 0f || p.y < -30f) {
                 splashIterator.remove()
+                recycleSplashParticle(p)
             }
         }
 
@@ -516,6 +607,7 @@ class HatPhysicsEngine {
             r.alpha -= dt * 2.8f
             if (r.alpha <= 0f || r.radius >= r.maxRadius) {
                 rippleIterator.remove()
+                recycleRipple(r)
             }
         }
     }
